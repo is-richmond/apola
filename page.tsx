@@ -35,6 +35,8 @@ import {
   SortAsc,      // ✅ НОВОЕ: Иконка для сортировки
 } from 'lucide-react';
 
+// Добавить к существующим импортам
+import { getAllUsersWithAnswers, getAllQuestions, UserWithAnswers, Question, QuestionOption } from "@/lib/api/kyc"; // укажите правильный путь
 // Импортируем getBybitSubMembers и SubMember из файла bybit API
 import { getBybitSubMembers, SubMember, getAllWithdrawal, WithdrawalRequest, WithdrawalResponse, Document, sendUserTemplateEmail } from "@/lib/api/bybit";
 
@@ -79,6 +81,12 @@ interface SubMemberDocument {
 type RiskFilterType = 'ALL' | 'NOT_ASSIGNED' | 'LOW' | 'MEDIUM' | 'HIGH';
 
 const SubaccountPage = () => {
+
+  // Добавить после существующих useState
+  const [surveyAnswers, setSurveyAnswers] = useState<UserWithAnswers[]>([]);
+  const [surveyQuestions, setSurveyQuestions] = useState<Question[]>([]);
+  const [loadingSurveyData, setLoadingSurveyData] = useState(false);
+  const [pdlQuestionId, setPdlQuestionId] = useState<string | null>(null);
   // Состояния для таблицы Bybit Саб-аккаунтов
   const [subMembers, setSubMembers] = useState<SubMember[]>([]);
   const [loadingSubMembers, setLoadingSubMembers] = useState(true);
@@ -672,6 +680,8 @@ const SubaccountPage = () => {
     }
   }, [filteredSubMembers]);
 
+  
+
   // Обработчики для изменения статуса вывода
   const handleEditClick = (request: WithdrawalRequest) => {
     setEditingRequestId(request.id);
@@ -966,6 +976,93 @@ const SubaccountPage = () => {
     
     handleCloseRejectModal();
   };
+
+  const findPDLQuestion = useCallback((questions: Question[]): Question | null => {
+    const pdlKeywords = ["являетесь ли вы или члены вашей семьи пдл", "пдл"];
+    
+    return questions.find(question => {
+      const questionText = question.text.toLowerCase().trim();
+      return pdlKeywords.some(keyword => questionText.includes(keyword));
+    }) || null;
+  }, []);
+
+  const getPDLAnswerForUser = useCallback((userId: string): { answer: string | null, status: string } => {
+    if (!pdlQuestionId) {
+      return { answer: null, status: 'no_question' };
+    }
+
+    const userAnswers = surveyAnswers.find(user => user.user_id === userId);
+    if (!userAnswers) {
+      return { answer: null, status: 'no_answers' };
+    }
+
+    const pdlAnswer = userAnswers.answers.find(answer => answer.question_id === pdlQuestionId);
+    if (!pdlAnswer) {
+      return { answer: null, status: 'no_answer' };
+    }
+
+    let answerText: string | null = null;
+    
+    if (pdlAnswer.selected_option_text) {
+      answerText = pdlAnswer.selected_option_text;
+    } else if (pdlAnswer.custom_answer) {
+      answerText = pdlAnswer.custom_answer;
+    } else {
+      answerText = 'Не указано';
+    }
+
+    return {
+      answer: answerText,
+      status: pdlAnswer.status
+    };
+  }, [surveyAnswers, pdlQuestionId]);
+
+
+
+  // Добавить после существующих функций
+  const fetchSurveyData = useCallback(async () => {
+    try {
+      setLoadingSurveyData(true);
+      const [answersData, questionsData] = await Promise.all([
+        getAllUsersWithAnswers(),
+        getAllQuestions()
+      ]);
+      
+      setSurveyAnswers(answersData);
+      setSurveyQuestions(questionsData);
+      
+      // Находим вопрос про ПДЛ
+      const pdlQuestion = findPDLQuestion(questionsData);
+      if (pdlQuestion) {
+        setPdlQuestionId(pdlQuestion.id);
+        console.log('Found PDL question:', pdlQuestion.text);
+      } else {
+        console.log('PDL question not found');
+      }
+    } catch (error) {
+      console.error('Error loading survey data:', error);
+      toast.error('Ошибка загрузки данных опроса');
+    } finally {
+      setLoadingSurveyData(false);
+    }
+  }, [findPDLQuestion]);
+
+
+  useEffect(() => {
+    if (!mounted) return;
+    
+    fetchSubMembersData();
+    fetchUsersWithRisks();
+    fetchSurveyData(); // ✅ ДОБАВИТЬ этот вызов
+
+    const intervalId = setInterval(() => {
+      fetchSubMembersData();
+      fetchUsersWithRisks();
+      fetchSurveyData(); // ✅ ДОБАВИТЬ этот вызов
+    }, 20000);
+
+    return () => clearInterval(intervalId);
+  }, [fetchSubMembersData, fetchUsersWithRisks, fetchSurveyData, mounted]);
 
   const handleFreezeUnfreezeSubaccount = async (subUid: string, freeze: boolean) => {
     setProcessingFreezeUnfreezeUid(subUid);
@@ -1665,6 +1762,7 @@ const SubaccountPage = () => {
                     <th className="text-center p-4 font-medium text-foreground">Локальный статус</th>
                     <th className="text-center p-4 font-medium text-foreground">Уровень классификации</th>
                     <th className="text-center p-4 font-medium text-foreground">Риск</th>
+                    <th className="text-center p-4 font-medium text-foreground">ПДЛ Статус</th>
                     <th className="text-center p-4 font-medium text-foreground">Действия</th>
                     <th className="text-center p-4 font-medium text-foreground">Управление</th>
                   </tr>
@@ -1843,6 +1941,40 @@ const SubaccountPage = () => {
                               })()}
                             </div>
                           )}
+                        </td>
+                        <td className="p-4 text-center">
+                          {(() => {
+                            if (loadingSurveyData) {
+                              return <span className="text-muted-foreground text-sm">Загрузка...</span>;
+                            }
+                            
+                            const pdlData = getPDLAnswerForUser(member.id);
+                            
+                            return (
+                              <div className="space-y-1">
+                                <p className="text-sm text-foreground font-medium">
+                                  {pdlData.answer || 'Не указано'}
+                                </p>
+                                <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
+                                  pdlData.status === 'APPROVED' ? 'bg-green-100 text-green-800' :
+                                  pdlData.status === 'REJECTED' ? 'bg-red-100 text-red-800' :
+                                  pdlData.status === 'pending' ? 'bg-yellow-100 text-yellow-800' :
+                                  pdlData.status === 'no_question' ? 'bg-gray-100 text-gray-800' :
+                                  pdlData.status === 'no_answers' ? 'bg-blue-100 text-blue-800' :
+                                  pdlData.status === 'no_answer' ? 'bg-orange-100 text-orange-800' :
+                                  'bg-gray-100 text-gray-800'
+                                }`}>
+                                  {pdlData.status === 'APPROVED' ? 'Одобрено' :
+                                  pdlData.status === 'REJECTED' ? 'Отклонено' :
+                                  pdlData.status === 'pending' ? 'Ожидает' :
+                                  pdlData.status === 'no_question' ? 'Вопрос не найден' :
+                                  pdlData.status === 'no_answers' ? 'Нет ответов' :
+                                  pdlData.status === 'no_answer' ? 'Не отвечено' :
+                                  'Нет данных'}
+                                </span>
+                              </div>
+                            );
+                          })()}
                         </td>
                         <td className="p-4">
                           <div className="flex flex-col gap-2">
